@@ -13,10 +13,9 @@
 #define MACRO_STRINGIFY(x) STRINGIFY(x)
 
 #include "cassert"
+
 //#include "eigen-3.4.0/Eigen/Dense"
 //#include "eigen-3.4.0/Eigen/Eigenvalues"
-
-
 
 const int32_t inf = 1000000000; //1e9
 
@@ -54,7 +53,7 @@ bool check_size_3d(Image3d &image) {
     }
 #pragma omp parallel for num_threads(4) collapse(2)
     for (size_t i = 0; i < image.size(); ++i) {
-        for (int j = 0; j < image[i].size(); ++j) {
+        for (size_t j = 0; j < image[i].size(); ++j) {
             if (image[i][j].size() != image[0][0].size()) {
                 return false;
             }
@@ -75,7 +74,7 @@ bool check_size_3d(Image3d &image) {
 //    Eigen::EigenSolver<Eigen::Matrix<double, 2, 2>> solver(transformation_matrix);
 //    return solver.eigenvalues()[0].real() > 0 && solver.eigenvalues()[1].real() > 0;
 //}
-//
+
 //bool check_transformation_matrix_3d(std::vector<std::vector<double>> &transformation) {
 //    if (transformation.size() != 3) {
 //        return false;
@@ -374,7 +373,7 @@ Image2d make_transformation_2d(Image2d &image,
                                std::string connectivity_type = "8-connectivity",
                                bool is_signed = false) {
     assert(check_size_2d(image));
-    assert(check_transformation_matrix_2d(transformation));
+//    assert(check_transformation_matrix_2d(transformation));
 
     Image2d transformed_image(image.size());
 #pragma omp parallel for num_threads(4)
@@ -430,6 +429,7 @@ Image2d make_transformation_2d(Image2d &image,
     }
     return transformed_image;
 }
+
 Image3d make_transformation_3d(Image3d &image,
                                Image2d transformation = {{1.0, 0.0, 0.0},
                                                          {0.0, 1.0, 0.0},
@@ -437,7 +437,7 @@ Image3d make_transformation_3d(Image3d &image,
                                std::string connectivity_type = "6-connectivity",
                                bool is_signed = false) {
     assert(check_size_3d(image));
-    assert(check_transformation_matrix_3d(transformation));
+//    assert(check_transformation_matrix_3d(transformation));
 
     Image3d transformed_image(image.size());
 #pragma omp parallel for num_threads(4) collapse(2)
@@ -500,29 +500,134 @@ Image3d make_transformation_3d(Image3d &image,
     return transformed_image;
 }
 
+bool is_border_2d_no_graph(Image2d &image, int32_t x, int32_t y, bool black) {
+
+#pragma omp parallel for num_threads(4) collapse(2)
+    for (int32_t i = -1; i <= 1; ++i) {
+        for (int32_t j = -1; j <= 1; ++j) {
+            if (abs(i + j) == 1) {
+                int32_t new_x = x + i;
+                int32_t new_y = y + j;
+                if (new_x >= 0 && new_y >= 0 && new_x < image.size() && new_y < image[0].size()) {
+                    if (image[new_x][new_y] == !black) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+Image2d make_transformation_2d_brute(Image2d &image,
+                                     Image2d transformation = {{1.0, 0.0},
+                                                               {0.0, 1.0}},
+                                     bool is_signed = false) {
+    assert(check_size_2d(image));
+//    assert(check_transformation_matrix_2d(transformation));
+
+    Image2d transformed_image(image.size());
+#pragma omp parallel for num_threads(4)
+    for (int32_t i = 0; i < image.size(); ++i) {
+        transformed_image[i].assign(image[i].size(), inf);
+    }
+
+    std::vector<std::pair<int32_t, int32_t>> border;
+
+#pragma omp parallel for num_threads(4) collapse(2)
+    for (int32_t i = 0; i < image.size(); ++i) {
+        for (int32_t j = 0; j < image[i].size(); ++j) {
+            if (image[i][j] != 0) {
+                transformed_image[i][j] = 0;
+                if (is_border_2d_no_graph(image, i, j, true)) {
+                    border.emplace_back(i, j);
+                }
+            }
+        }
+    }
+#pragma omp parallel for num_threads(4) collapse(3)
+    for (int32_t i = 0; i < image.size(); ++i) {
+        for (int32_t j = 0; j < image[i].size(); ++j) {
+            if (image[i][j] == 0) {
+                for (auto &k: border) {
+                    int32_t x = k.first;
+                    int32_t y = k.second;
+                    transformed_image[i][j] = std::min(transformed_image[i][j], calculate_distance_2d({i,j},{x,y}, transformation));
+                }
+            }
+        }
+    }
+
+    if (is_signed) {
+        Image2d transformed_image_signed(image.size());
+#pragma omp parallel for num_threads(4)
+        for (int32_t i = 0; i < image.size(); ++i) {
+            transformed_image_signed[i].assign(image[i].size(), inf);
+        }
+        border.clear();
+#pragma omp parallel for num_threads(4) collapse(2)
+        for (int32_t i = 0; i < image.size(); ++i) {
+            for (int32_t j = 0; j < image[i].size(); ++j) {
+                if (image[i][j] == 0) {
+                    transformed_image_signed[i][j] = 0;
+                    if (is_border_2d_no_graph(image, i, j, false)) {
+                        border.emplace_back(i, j);
+                    }
+                }
+            }
+        }
+#pragma omp parallel for num_threads(4) collapse(3)
+        for (int32_t i = 0; i < image.size(); ++i) {
+            for (int32_t j = 0; j < image[i].size(); ++j) {
+                if (image[i][j] == 1) {
+                    for (auto &k: border) {
+                        int32_t x = k.first;
+                        int32_t y = k.second;
+                        transformed_image_signed[i][j] = std::min(transformed_image_signed[i][j], calculate_distance_2d({i,j},{x,y}, transformation));
+                    }
+                }
+            }
+        }
+        for (int32_t i = 0; i < image.size(); ++i) {
+            for (int32_t j = 0; j < image[i].size(); ++j) {
+                transformed_image[i][j] -= transformed_image_signed[i][j];
+            }
+        }
+    }
+    return transformed_image;
+}
+
+Image2d make_transformation_2d_ellipse(Image2d &image, double lambda1, double lambda2, double theta, std::string &connectivity_type, bool is_signed) {
+    std::vector<std::vector<double>> transformation(2, std::vector<double>(2));
+    transformation[0][0] = lambda1 * lambda1 * cos(theta) * cos(theta) + lambda2 * lambda2 * sin(theta) * sin(theta);
+    transformation[1][1] = lambda1 * lambda1 * sin(theta) * sin(theta) + lambda2 * lambda2 * cos(theta) * cos(theta);
+    transformation[0][1] = transformation[1][0] = (lambda1 * lambda1 - lambda2 * lambda2) * sin(theta) * cos(theta);
+    return make_transformation_2d(image, transformation, connectivity_type, is_signed);
+}
+
 namespace py = pybind11;
 
-PYBIND11_MODULE(python_example, m) {
+PYBIND11_MODULE(edt, m) {
     m.doc() = R"pbdoc(
-        Pybind11 example plugin
-        -----------------------
-        .. currentmodule:: python_example
-        .. autosummary::
-           :toctree: _generate
-           add
-           subtract
+    make_transformation_2d
+
+    make_transformation_3d
+
+    make_transformation_2d_brute
+
+    make_transformation_2d_ellipse
     )pbdoc";
-
-    m.def("subtract", [](int i, int j) { return i - j; }, R"pbdoc(
-        Subtract two numbers
-        Some other explanation about the subtract function.
-    )pbdoc");
-
 
     m.def("make_transformation_2d", &make_transformation_2d, R"pbdoc(
     )pbdoc");
 
     m.def("make_transformation_3d", &make_transformation_3d, R"pbdoc(
+    )pbdoc");
+
+    m.def("make_transformation_2d_brute", &make_transformation_2d_brute, R"pbdoc(
+    )pbdoc");
+
+    m.def("make_transformation_2d_ellipse", &make_transformation_2d_ellipse, R"pbdoc(
     )pbdoc");
 
 #ifdef VERSION_INFO
